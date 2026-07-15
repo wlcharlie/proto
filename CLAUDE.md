@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-《異界魔王》RIFTLORD — a browser game built on **Phaser 4** with **Vite** bundling and **TypeScript**, started from the `phaserjs/template-vite-ts` scaffold. A portal-conquest production-line roguelike: place worlds (makers), wire supply lines to portals, portals backlash when under-fed. Design docs live in `docs/`: `gdd.md` is the design source of truth; `prototype-notes.md` records the v0.1 prototype's scope, design calls made during implementation, and tuning knobs. UI text is Traditional Chinese.
+《異界魔王》RIFTLORD — a browser game built on **Phaser 4** with **Vite** bundling and **TypeScript**, started from the `phaserjs/template-vite-ts` scaffold. A **reverse tower-defense roguelike** (v0.5 "詛咒行軍"): you run the creep side — a fixed squad marches from the spring down a lane to a boss-HP rift gate, a curse drains their HP en route, and your facilities are buff-towers (heal/enchant) bought and upgraded with mana earned by damaging the gate. Death on the lane is permanent; wipe = run over. Design docs live in `docs/`: `gdd.md` is the design source of truth (§二 核心循環 describes v0.5; parts of §三 are marked as v0.1–0.4 history); `prototype-notes.md` records the current prototype's scope, design calls, and tuning knobs. UI text is Traditional Chinese.
 
 ## Commands
 
@@ -24,7 +24,7 @@ There is **no test runner and no linter** configured. Type safety comes solely f
 
 **Two-stage bootstrap:**
 - `src/main.ts` — waits for `DOMContentLoaded`, calls `StartGame('game-container')`, and exposes the game instance as `window.__game` (debug handle for console/tests).
-- `src/game/main.ts` — defines the Phaser `GameConfig` (fixed canvas **1024×768**, `type: AUTO`, `Scale.FIT` + center) and lists the scenes. This is where global game settings live.
+- `src/game/main.ts` — defines the Phaser `GameConfig` (`type: AUTO`, `Scale.FIT` + center) and lists the scenes. This is where global game settings live. **Retina handling:** the canvas is created at **1024×768 × `DPR`** (from `ui.ts`, capped at 2) and every scene's `create()` starts with `this.cameras.main.setZoom(DPR).centerOn(512, 384)`, so the logical coordinate space stays **1024×768** everywhere. Consequences: all `Text` styles must pass `resolution: DPR` (the `label()`/`makeButton()` helpers do), and raw pointer reads must use `pointer.worldX/worldY`, not `pointer.x/y` (interactive zones are camera-aware automatically).
 
 **Scene pipeline** (`src/game/scenes/`) — the **first scene in the config array auto-starts**; every transition is an explicit `this.scene.start('Name')`:
 
@@ -35,13 +35,16 @@ MainMenu → Game → GameOver → (MainMenu or straight back to Game)
 There is no Boot/Preloader chain: all art is programmatic (Graphics + emoji Text), nothing is loaded. `Game` restarts itself (`scene.restart()`) for each new level; all of its state must be re-zeroed at the top of `create()`.
 
 **Game modules** (`src/game/`):
-- `balance.ts` — every tuning knob, commented against the GDD's proposed values. Tune here, nowhere else.
-- `types.ts` — traits/worlds/doors types + trait tables (emoji, colors, name generation) + starting lineup.
-- `levelgen.ts` — per-level door specs (req count ramps by level), drain/enemy scaling, deploy limit.
-- `grid.ts` — 15×9 board geometry (64px cells at offset 32,88) + BFS pathfinding for routes.
-- `run.ts` — mutable singleton for the current run (level, integrity, lineup, conquests).
-- `save.ts` — meta progression (reward points, unlock defs) persisted in `localStorage` key `riftlord_save_v1`.
+- `balance.ts` — every tuning knob, commented. Tune here, nowhere else.
+- `types.ts` — traits (races dormant in v0.5), unit/door types, facility table, door flavor-name generation.
+- `levelgen.ts` — one door per level: boss HP (exponential), curse DPS, weakness/resist trait from level 3.
+- `grid.ts` — 15×9 board geometry (64px cells at offset 32,88) + BFS pathfinding (currently unused; kept for when free-form routing returns).
+- `run.ts` — mutable singleton for the current run (level, squad with per-unit HP, mana, skills, placed stations — all persist across levels).
+- `skills.ts` — in-run skill tree defs + effect helpers (`reviveRatio()`, `squadCap()`, …); scenes read effects only through these.
+- `save.ts` — meta progression (reward points, unlock defs) persisted in `localStorage` key `riftlord_save_v2`.
 - `ui.ts` — `label()`/`makeButton()` helpers; shared CJK font stack.
+
+**Fixed layout** (v0.4.1+): spring at cell (7,7), gate at (7,1), auto-wired straight lane between them (`SPRING_CELL`/`DOOR_CELL` in `scenes/Game.ts`). Stations only take effect on lane cells.
 
 **Coordinates:** menu scenes hard-code the canvas center `(512, 384)`; the board layout constants live in `grid.ts`. If you change the canvas size, both must change.
 

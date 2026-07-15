@@ -1,8 +1,8 @@
 import { Scene } from 'phaser';
+import { BAL } from '../balance';
 import { startNewRun } from '../run';
 import { UNLOCKS, buy, canBuy, clearSave, hasUnlock, loadSave, persistSave } from '../save';
-import { FACILITY_INFO, TRAIT_EMOJI, facilityOfWorld, startingLineup } from '../types';
-import { label, makeButton } from '../ui';
+import { DPR, label, makeButton } from '../ui';
 
 export class MainMenu extends Scene {
     private wipeArmed = false;
@@ -12,27 +12,31 @@ export class MainMenu extends Scene {
     }
 
     create() {
+        this.cameras.main.setZoom(DPR).centerOn(512, 384); // Retina:見 game/main.ts
+
         const save = loadSave();
         this.wipeArmed = false;
 
         label(this, 512, 82, '異界魔王', 52, '#e8ecf4', 0.5).setFontStyle('bold');
-        label(this, 512, 128, 'R I F T L O R D · 原型 v0.1', 15, '#8a93a6', 0.5);
-        label(this, 512, 166, '開啟傳送門,把產線鋪向異界征服它 —— 疏於照顧,產線瞬間變戰線。', 15, '#aab3c6', 0.5);
+        label(this, 512, 128, 'R I F T L O R D · 原型 v0.5「詛咒行軍」', 15, '#8a93a6', 0.5);
+        label(this, 512, 166, '護送小隊穿過詛咒戰場,轟開一道道異界之門 —— HP 是唯一的貨幣。', 15, '#aab3c6', 0.5);
 
-        // 左欄:起始陣容
-        const lineup = startingLineup(hasUnlock(save, 'world-beast'));
-        label(this, 150, 226, `起始陣容(${lineup.length})— 兵源組成與設施`, 18, '#e8ecf4');
-        lineup.forEach((w, i) => {
+        // 左欄:遠征配置(局外解鎖的效果總覽)
+        label(this, 150, 226, '遠征配置', 18, '#e8ecf4');
+        const rows: [string, string][] = [
+            ['起始小隊', `${BAL.SQUAD_START + (hasUnlock(save, 'start-squad') ? 1 : 0)} 名`],
+            ['開局魔力', `✦ ${BAL.MANA_START + (hasUnlock(save, 'start-mana') ? 50 : 0)}`],
+            ['開局技能點', `${hasUnlock(save, 'start-skill') ? 1 : 0} 點`],
+        ];
+        rows.forEach(([k, v], i) => {
             const y = 268 + i * 58;
             const g = this.add.graphics();
             g.fillStyle(0x161d29, 1);
             g.fillRoundedRect(150, y - 24, 300, 48, 10);
-            g.lineStyle(2, w.color, 0.9);
+            g.lineStyle(2, 0x3c5a80, 0.9);
             g.strokeRoundedRect(150, y - 24, 300, 48, 10);
-            label(this, 170, y - 9, w.name, 15, '#e8ecf4');
-            const fac = FACILITY_INFO[facilityOfWorld(w)];
-            label(this, 170, y + 13, `設施:${fac.name} ${fac.emoji}`, 11, '#8a93a6');
-            label(this, 430, y, w.traits.map(t => TRAIT_EMOJI[t]).join(' '), 18, '#e8ecf4', 1);
+            label(this, 170, y, k, 15, '#aab3c6');
+            label(this, 430, y, v, 17, '#e8ecf4', 1);
         });
 
         // 右欄:局外解鎖
@@ -62,14 +66,14 @@ export class MainMenu extends Scene {
             }
         });
 
-        makeButton(this, 512, 556, '開始新的一輪 ▶', () => {
+        makeButton(this, 512, 556, '開始遠征 ▶', () => {
             startNewRun(save);
             this.scene.start('Game');
         }, { w: 280, h: 58, fontSize: 22, fill: 0x1f3a2a, stroke: 0x4a8a5a });
 
-        label(this, 512, 626, '一輪 = 一顆輿圖裝置的旅程:每關穩定所有傳送門即過關,征服的異界成為你的新產線。', 13, '#8a93a6', 0.5);
-        label(this, 512, 648, '傳送門崩潰會折損裝置完整度;完整度耗盡 → 裝置碎裂,結算獎勵點做局外解鎖。', 13, '#8a93a6', 0.5);
-        label(this, 512, 684, '操作:放泉水與加工站(蓋在線上生效)|從泉水拖曳畫線到門|點線段拆除|空白鍵 戰術暫停|1 / 2 調速', 13, '#5f89b8', 0.5);
+        label(this, 512, 626, '單位走到門 = 貢獻傷害並賺取魔力,之後從泉水折半復活;死在路上 = 永久死亡。', 13, '#8a93a6', 0.5);
+        label(this, 512, 648, '魔力:蓋站/升級/補員。門破 = 過關 +1 技能點;全滅(且補不起員)= 遠征結束,結算局外點。', 13, '#8a93a6', 0.5);
+        label(this, 512, 684, '操作:點卡片蓋站(蓋在產線上才生效)|點回復站升級|✕ 拆除退一半|空白鍵 暫停|1 / 2 調速', 13, '#5f89b8', 0.5);
 
         const wipe = label(this, 1000, 744, '清除存檔', 12, '#5c6577', 1).setInteractive({ useHandCursor: true });
         wipe.on('pointerdown', () => {

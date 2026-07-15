@@ -14,12 +14,12 @@ export interface UnlockDef {
 }
 
 export const UNLOCKS: UnlockDef[] = [
-    { id: 'world-beast', name: '擴充起始陣容', desc: '開局多帶一座 荒牙異界(野獸🐺)', cost: 3 },
-    { id: 'integrity-2', name: '裝置強化 I', desc: '完整度上限 2:可承受 2 次傳送門崩潰', cost: 5 },
-    { id: 'integrity-3', name: '裝置強化 II', desc: '完整度上限 3(GDD 上限)', cost: 10, requires: 'integrity-2' },
+    { id: 'start-mana', name: '魔力儲備', desc: '開局魔力 +50(開場就蓋得起半座站)', cost: 2 },
+    { id: 'start-squad', name: '擴編遠征隊', desc: '起始小隊 +1 名', cost: 3 },
+    { id: 'start-skill', name: '先行者', desc: '開局附帶 1 點技能點', cost: 5 },
 ];
 
-const KEY = 'riftlord_save_v1';
+const KEY = 'riftlord_save_v2'; // v0.5 起換 key:舊解鎖項已不存在,原型期直接作廢舊檔
 
 export function loadSave(): SaveData {
     try {

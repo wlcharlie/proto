@@ -4,11 +4,16 @@ import { GameObjects, Scene } from 'phaser';
 
 export const FONT = '"PingFang TC", "Heiti TC", "Microsoft JhengHei", "Noto Sans TC", system-ui, sans-serif';
 
+/** Retina 對策:canvas 以 DPR 倍尺寸渲染、鏡頭 zoom DPR 倍,邏輯座標維持 1024×768。
+ *  文字是點陣化的,所有 Text 都要帶 resolution: DPR 才會跟著變清晰。上限 2 夠用。 */
+export const DPR = Math.min(window.devicePixelRatio || 1, 2);
+
 export function label(
     scene: Scene, x: number, y: number, str: string, size: number, color: string,
     originX = 0, originY = 0.5,
 ): GameObjects.Text {
-    return scene.add.text(x, y, str, { fontFamily: FONT, fontSize: size, color }).setOrigin(originX, originY);
+    return scene.add.text(x, y, str, { fontFamily: FONT, fontSize: size, color, resolution: DPR })
+        .setOrigin(originX, originY);
 }
 
 export interface ButtonOpts {
@@ -44,7 +49,7 @@ export function makeButton(
     draw(false);
 
     const t = scene.add.text(0, 1, text, {
-        fontFamily: FONT, fontSize: opts.fontSize ?? 19, color: opts.color ?? '#e8ecf4',
+        fontFamily: FONT, fontSize: opts.fontSize ?? 19, color: opts.color ?? '#e8ecf4', resolution: DPR,
     }).setOrigin(0.5);
 
     const z = scene.add.zone(0, 0, w, h).setInteractive({ useHandCursor: true });
