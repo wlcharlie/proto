@@ -1,7 +1,7 @@
 import { Scene } from 'phaser';
 import { startNewRun } from '../run';
 import { UNLOCKS, buy, canBuy, clearSave, hasUnlock, loadSave, persistSave } from '../save';
-import { TRAIT_EMOJI, startingLineup } from '../types';
+import { FACILITY_INFO, TRAIT_EMOJI, facilityOfWorld, startingLineup } from '../types';
 import { label, makeButton } from '../ui';
 
 export class MainMenu extends Scene {
@@ -21,7 +21,7 @@ export class MainMenu extends Scene {
 
         // 左欄:起始陣容
         const lineup = startingLineup(hasUnlock(save, 'world-beast'));
-        label(this, 150, 226, `起始陣容(${lineup.length})`, 18, '#e8ecf4');
+        label(this, 150, 226, `起始陣容(${lineup.length})— 兵源組成與設施`, 18, '#e8ecf4');
         lineup.forEach((w, i) => {
             const y = 268 + i * 58;
             const g = this.add.graphics();
@@ -29,7 +29,9 @@ export class MainMenu extends Scene {
             g.fillRoundedRect(150, y - 24, 300, 48, 10);
             g.lineStyle(2, w.color, 0.9);
             g.strokeRoundedRect(150, y - 24, 300, 48, 10);
-            label(this, 170, y, w.name, 17, '#e8ecf4');
+            label(this, 170, y - 9, w.name, 15, '#e8ecf4');
+            const fac = FACILITY_INFO[facilityOfWorld(w)];
+            label(this, 170, y + 13, `設施:${fac.name} ${fac.emoji}`, 11, '#8a93a6');
             label(this, 430, y, w.traits.map(t => TRAIT_EMOJI[t]).join(' '), 18, '#e8ecf4', 1);
         });
 
@@ -67,7 +69,7 @@ export class MainMenu extends Scene {
 
         label(this, 512, 626, '一輪 = 一顆輿圖裝置的旅程:每關穩定所有傳送門即過關,征服的異界成為你的新產線。', 13, '#8a93a6', 0.5);
         label(this, 512, 648, '傳送門崩潰會折損裝置完整度;完整度耗盡 → 裝置碎裂,結算獎勵點做局外解鎖。', 13, '#8a93a6', 0.5);
-        label(this, 512, 684, '操作:點卡片放異界與泉水|從源頭按住拖曳畫線到門|點線段拆除|空白鍵 戰術暫停|1 / 2 調速', 13, '#5f89b8', 0.5);
+        label(this, 512, 684, '操作:放泉水與加工站(蓋在線上生效)|從泉水拖曳畫線到門|點線段拆除|空白鍵 戰術暫停|1 / 2 調速', 13, '#5f89b8', 0.5);
 
         const wipe = label(this, 1000, 744, '清除存檔', 12, '#5c6577', 1).setInteractive({ useHandCursor: true });
         wipe.on('pointerdown', () => {

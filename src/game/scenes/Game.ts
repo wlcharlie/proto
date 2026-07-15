@@ -1,14 +1,13 @@
-// 核心場景:驗證 GDD 的關鍵問題 ——
-// 「鋪產線餵門 + 反噬時即時重新分配」這個 30 秒循環本身好不好玩?
+// 核心場景(v0.4「後勤魔王」):玩家的手在「加工端」,不在「產量端」。
 //
-// 全程即時:開局棋盤沒有門,裂隙會先「預告」數秒再撕開(位置隨機、分批出現)。
-// 玩家隨時可放異界與泉水(下方卡片)、從源頭「按住拖曳」手繪產線到門、點線段拆除。
-// 空白鍵暫停 = 戰術規劃(暫停中仍可放置與畫線)。
+// 前線戰事在畫面外進行:你的軍團持續從裂隙歸返,在「泉水」復活(血量不一、種族
+// 組成 = 你的異界陣容,速率固定 → 量不可放大)。玩家在路途上安排「加工站」
+//(回復/附魔,線經過即生效、可串接),把兵慢慢運抵各傳送門再次投入。
 //
-// 單位的一生(v0.3):出生(異界)→ 沿線上工(規格符合度加權貢獻)→ 過門打 4 折
-// → 從「泉水」復活(小補,保留特性)→ 沿泉水的線再上工 → 折舊後 < 榨乾線即消散。
-// 沒放泉水(或泉水沒連線)= 餵完即消散;不再有原路折返。
-// 門進度被抵抗持續下壓;跌破反噬線,敵人沿「接到該門的所有線」湧出(產線即戰線)。
+// 門的抵抗會隨「開門時間」扎根成長 → 每扇門是一個征服窗口,拖 = 輸;
+// 規格不符 ×0.05 純噪音 → 加工鏈的品質就是戰力;
+// 反噬時敵人沿線殺進後勤網,摸到加工站會癱瘓它幾秒 → 火災要救。
+// 全門穩定 → 過關;征服異界 = 兵源加入該族 + 獲得該界的設施(附魔站/回復站)。
 
 import { Scene } from 'phaser';
 import { BAL } from '../balance';
@@ -16,51 +15,53 @@ import { genLevel } from '../levelgen';
 import { BOARD_X, BOARD_Y, CELL, COLS, Cell, ROWS, bfsPath, cellX, cellY, xyToCell } from '../grid';
 import { run, startNewRun } from '../run';
 import { loadSave, persistSave } from '../save';
-import { DoorSpec, LevelSpec, TRAIT_EMOJI, Trait, WorldDef, worldColor } from '../types';
+import {
+    DoorSpec, FACILITY_INFO, FacilityType, LevelSpec, TRAIT_COLOR, TRAIT_EMOJI, Trait,
+    WorldDef, facilityOfWorld, worldColor,
+} from '../types';
 import { FONT, label, makeButton } from '../ui';
 
 const SPRING_COLOR = 0x53c2d8;
+const FACILITY_ORDER: FacilityType[] = ['heal', '火', '水', '時'];
 
 interface Route {
     id: number;
-    origin: Source;
+    origin: Spring;
     door: Door;
     points: { x: number; y: number }[];
-    cellKeys: Set<number>;     // 途經格(供點擊拆線與裂隙避開)
+    cells: Cell[];             // 依序途經格(加工站觸發、拆線點擊、裂隙避開)
+    cellKeys: Set<number>;
     length: number;
     line: Phaser.GameObjects.Graphics;
     dead: boolean;
 }
 
-/** 一包「單位」:回流待命與裂隙傳送中都以此形式存在。 */
+/** 一包「單位」:待命與裂隙傳送中都以此形式存在。 */
 interface Parcel {
     value: number;
-    traits: Trait[];
+    traits: Trait[];           // [種族, 屬性?] —— 種族先天不可變,屬性欄可被附魔覆蓋
 }
 
-interface SourceBase {
+interface Spring {
     c: number; r: number; x: number; y: number;
     color: number;
     routes: Route[];
     nextRoute: number;
-    parked: Parcel[];          // 待命:沒有線可走時暫存,畫線後派出
+    spawnT: number;
+    parked: Parcel[];
+    incoming: (Parcel & { t: number })[];
     cont: Phaser.GameObjects.Container;
     body: Phaser.GameObjects.Graphics;
-}
-
-interface Maker extends SourceBase {
-    kind: 'maker';
-    world: WorldDef;
-    spawnT: number;
-}
-
-interface Spring extends SourceBase {
-    kind: 'spring';
-    incoming: (Parcel & { t: number })[];  // 裂隙傳送中(過門 → 復活的延遲)
     countTxt: Phaser.GameObjects.Text;
 }
 
-type Source = Maker | Spring;
+interface Station {
+    type: FacilityType;
+    c: number; r: number; x: number; y: number;
+    disabledT: number;         // >0 = 被反噬敵人癱瘓中
+    cont: Phaser.GameObjects.Container;
+    body: Phaser.GameObjects.Graphics;
+}
 
 type DoorState = 'active' | 'locked' | 'collapsed';
 
@@ -68,9 +69,10 @@ interface Door {
     spec: DoorSpec;
     c: number; r: number; x: number; y: number;
     progress: number;
+    age: number;               // 開門秒數:抵抗與湧出隨之扎根成長
     state: DoorState;
     enemyT: number;
-    rr: number;                // 反噬湧出的輪替索引
+    rr: number;
     routes: Route[];
     wasBacklash: boolean;
     cont: Phaser.GameObjects.Container;
@@ -82,7 +84,6 @@ interface Door {
     rateT: number;
 }
 
-/** 裂隙預告:標記出現 RIFT_LEAD 秒後,門才真正撕開。 */
 interface RiftAnnounce {
     spec: DoorSpec;
     c: number; r: number;
@@ -93,34 +94,33 @@ interface RiftAnnounce {
 
 interface Mob {
     kind: 'unit' | 'enemy';
-    value: number;             // 貢獻=戰力,同一個池(GDD)
+    value: number;
     traits: Trait[];
     route: Route;
-    dist: number;              // 沿路徑距離:0 = 源頭端,length = 門端
+    dist: number;              // 0 = 泉水端,length = 門端
     dir: 1 | -1;
+    cellK: number;             // 目前所在格 index(加工站觸發用)
     color: number;
     gfx: Phaser.GameObjects.Shape;
     alive: boolean;
 }
 
-/** 手繪中的產線。 */
 interface Drawing {
-    origin: Source;
     cells: Cell[];
     keys: Set<number>;
     gfx: Phaser.GameObjects.Graphics;
 }
 
 type Phase = 'run' | 'end';
-type PlacingSel = WorldDef | 'spring';
+type PlacingSel = 'spring' | FacilityType;
 
 const SPAN = () => BAL.BASE * BAL.STABLE_RATIO;
 const ck = (c: number, r: number) => r * COLS + c;
 
 export class Game extends Scene {
     private lvl!: LevelSpec;
-    private makers: Maker[] = [];
     private spring: Spring | null = null;
+    private stations: Station[] = [];
     private doors: Door[] = [];
     private pending: DoorSpec[] = [];
     private announces: RiftAnnounce[] = [];
@@ -133,10 +133,9 @@ export class Game extends Scene {
     private routeSeq = 0;
     private placing: PlacingSel | null = null;
     private drawing: Drawing | null = null;
-    private deployed = new Set<string>();
     private pulseT = 0;
     private crushArmed = 0;
-    private springHintShown = false;
+    private springNagged = false;
 
     private hudIntegrity!: Phaser.GameObjects.Text;
     private hudDoors!: Phaser.GameObjects.Text;
@@ -149,8 +148,7 @@ export class Game extends Scene {
     private pausedTxt!: Phaser.GameObjects.Text;
     private riftStatus!: Phaser.GameObjects.Text;
     private riftStatusLast = '';
-    private trayCards: { world: WorldDef | null; cont: Phaser.GameObjects.Container }[] = [];
-    private deployTxt!: Phaser.GameObjects.Text;
+    private trayCards: { key: 'spring' | FacilityType; cont: Phaser.GameObjects.Container; countTxt: Phaser.GameObjects.Text | null }[] = [];
     private ghost: Phaser.GameObjects.Container | null = null;
 
     constructor() {
@@ -161,8 +159,8 @@ export class Game extends Scene {
         if (run.lineup.length === 0) startNewRun(loadSave()); // 直接進此場景時的保險
 
         // scene.restart() 會重跑 create,所有狀態必須在這裡歸零
-        this.makers = [];
         this.spring = null;
+        this.stations = [];
         this.doors = [];
         this.announces = [];
         this.routesAll = [];
@@ -174,10 +172,9 @@ export class Game extends Scene {
         this.routeSeq = 0;
         this.placing = null;
         this.drawing = null;
-        this.deployed = new Set();
         this.pulseT = 0;
         this.crushArmed = 0;
-        this.springHintShown = false;
+        this.springNagged = false;
         this.trayCards = [];
         this.riftStatusLast = '';
         this.ghost = null;
@@ -191,7 +188,7 @@ export class Game extends Scene {
         this.buildTray();
         this.wireInput();
 
-        this.showMsg(`第 ${run.level} 關:輿圖裝置啟動,第一道裂隙即將撕開 —— 佈置你的產線!`, '#9fc1e8');
+        this.showMsg(`第 ${run.level} 關:先放置泉水 —— 你的軍團正從前線歸返!`, '#9fc1e8');
     }
 
     // ---------------------------------------------------------------- 佈景
@@ -213,14 +210,6 @@ export class Game extends Scene {
 
     // ---------------------------------------------------------------- 共用查詢
 
-    private sources(): Source[] {
-        return this.spring ? [...this.makers, this.spring] : [...this.makers];
-    }
-
-    private makerAt(c: number, r: number): boolean {
-        return this.makers.some(m => m.c === c && m.r === r);
-    }
-
     private springAt(c: number, r: number): boolean {
         return this.spring !== null && this.spring.c === c && this.spring.r === r;
     }
@@ -233,23 +222,38 @@ export class Game extends Scene {
         return this.announces.some(a => a.c === c && a.r === r);
     }
 
+    private stationAt(c: number, r: number): Station | undefined {
+        return this.stations.find(s => s.c === c && s.r === r);
+    }
+
+    /** 設施獎勵:基礎回復站 ×1 + 每座擁有的異界各出一座(有屬性→附魔站,純種族→回復站)。 */
+    private grantsOf(type: FacilityType): number {
+        let n = type === 'heal' ? 1 : 0;
+        for (const w of run.lineup) if (facilityOfWorld(w) === type) n++;
+        return n;
+    }
+
+    private remainingOf(type: FacilityType): number {
+        return this.grantsOf(type) - this.stations.filter(s => s.type === type).length;
+    }
+
     // ---------------------------------------------------------------- 裂隙生成
 
-    /** 幫新裂隙挑格子:分層放寬條件,理論上一定挑得到。 */
     private pickRiftCell(): Cell {
-        const srcCells = this.sources().map(s => ({ c: s.c, r: s.r }));
         const candidates: Cell[][] = [[], [], []];
         for (let c = 1; c <= COLS - 2; c++) {
             for (let r = 1; r <= ROWS - 2; r++) {
-                if (this.makerAt(c, r) || this.springAt(c, r) || this.doorAt(c, r) || this.announceAt(c, r)) continue;
+                if (this.springAt(c, r) || this.doorAt(c, r) || this.announceAt(c, r) || this.stationAt(c, r)) continue;
                 const doorNear = this.doors.some(d => Math.max(Math.abs(d.c - c), Math.abs(d.r - r)) < BAL.RIFT_DOOR_DIST)
                     || this.announces.some(a => Math.max(Math.abs(a.c - c), Math.abs(a.r - r)) < BAL.RIFT_DOOR_DIST);
                 if (doorNear) continue;
-                const srcDist = Math.min(...srcCells.map(s => Math.max(Math.abs(s.c - c), Math.abs(s.r - r))), 99);
+                const springDist = this.spring
+                    ? Math.max(Math.abs(this.spring.c - c), Math.abs(this.spring.r - r))
+                    : 99;
                 const onRoute = this.routesAll.some(rt => rt.cellKeys.has(ck(c, r)));
-                if (srcDist >= BAL.RIFT_MAKER_DIST && !onRoute) candidates[0].push({ c, r });
-                else if (srcDist >= BAL.RIFT_MAKER_DIST) candidates[1].push({ c, r });
-                else if (srcDist >= 1) candidates[2].push({ c, r });
+                if (springDist >= BAL.RIFT_MAKER_DIST && !onRoute) candidates[0].push({ c, r });
+                else if (springDist >= BAL.RIFT_MAKER_DIST) candidates[1].push({ c, r });
+                else if (springDist >= 1) candidates[2].push({ c, r });
             }
         }
         const tier = candidates.find(t => t.length > 0) ?? [{ c: 7, r: 4 }];
@@ -273,7 +277,7 @@ export class Game extends Scene {
         this.cameras.main.shake(180, 0.005);
         this.poof(cellX(a.c), cellY(a.r), a.spec.color);
         const reqStr = a.spec.reqs.length > 0 ? a.spec.reqs.map(t => TRAIT_EMOJI[t]).join('') : '任意';
-        this.showMsg(`⚠ 裂隙開啟:${a.spec.worldName}之門(需求:${reqStr})`, '#ffd35c');
+        this.showMsg(`⚠ 裂隙開啟:${a.spec.worldName}之門(需求:${reqStr})—— 越早關掉越便宜!`, '#ffd35c');
         this.updateHudDoors();
     }
 
@@ -287,13 +291,12 @@ export class Game extends Scene {
             : label(this, 0, -2, '任意', 12, '#8a93a6', 0.5);
         const bar = this.add.graphics();
         const stateTxt = label(this, 0, 56, '', 12, '#8a93a6', 0.5);
-        // zone 沒掛事件,但要擋住「點棋盤拆線」誤觸;放線時的落點判定用 doorAtPoint()
         const zone = this.add.zone(0, 4, 64, 118).setInteractive({ useHandCursor: true });
         cont.add([body, name, req, bar, stateTxt, zone]);
 
         const door: Door = {
             spec, c, r, x, y,
-            progress: 0, state: 'active', enemyT: 0, rr: 0, routes: [],
+            progress: 0, age: 0, state: 'active', enemyT: 0, rr: 0, routes: [],
             wasBacklash: false, cont, body, bar, stateTxt,
             lastP: 0, rate: 0, rateT: 0,
         };
@@ -301,6 +304,11 @@ export class Game extends Scene {
         this.redrawDoorBody(door);
         this.redrawDoorBar(door);
         this.updateDoorText(door);
+    }
+
+    /** 門的當前抵抗:基礎 + 扎根成長(隨開門秒數)。 */
+    private doorDrain(d: Door): number {
+        return Math.min(BAL.DRAIN_ABS_MAX, this.lvl.drain + BAL.DRAIN_GROWTH * d.age);
     }
 
     private redrawDoorBody(d: Door) {
@@ -353,11 +361,12 @@ export class Game extends Scene {
         } else {
             const p = Math.round(d.progress);
             const arrow = d.rate > 0.05 ? ' ▲' : d.rate < -0.05 ? ' ▼' : '';
+            const drain = `抗${this.doorDrain(d).toFixed(1)}`;
             if (d.progress <= BAL.BASE * BAL.BACKLASH_RATIO) {
-                str = `反噬中 ${p}${arrow}`;
+                str = `反噬 ${p}${arrow}・${drain}`;
                 col = '#ff8c42';
             } else {
-                str = `${p} / ${SPAN()}${arrow}`;
+                str = `${p}/${SPAN()}${arrow}・${drain}`;
                 col = d.rate > 0.05 ? '#7dd87d' : d.rate < -0.05 ? '#c88484' : '#aab3c6';
             }
         }
@@ -426,7 +435,7 @@ export class Game extends Scene {
         this.tweens.add({ targets: this.hudMsg, alpha: 0, delay: 2000, duration: 400 });
     }
 
-    // ---------------------------------------------------------------- 陣容托盤(常駐)
+    // ---------------------------------------------------------------- 托盤(泉水 + 加工站 + 兵源顯示)
 
     private buildTray() {
         const bg = this.add.graphics().setDepth(10);
@@ -435,12 +444,12 @@ export class Game extends Scene {
         bg.lineStyle(1, 0x2a3242, 1);
         bg.lineBetween(0, 664, 1024, 664);
 
-        label(this, 24, 682, '點卡片→點棋盤放置|從異界/泉水按住拖曳,畫線到傳送門|點線段拆除', 13, '#8a93a6').setDepth(10);
-        this.deployTxt = label(this, 836, 682, '', 13, '#aab3c6', 1).setDepth(10);
+        label(this, 24, 682, '點卡片放置(設施蓋在線上生效,可串接)|從泉水拖曳畫線到門|點線段拆除', 13, '#8a93a6').setDepth(10);
+        const roster = run.lineup.map(w => w.traits.map(t => TRAIT_EMOJI[t]).join('')).join('・');
+        label(this, 836, 682, `兵源 ${roster}`, 12, '#aab3c6', 1).setDepth(10);
 
-        const n = run.lineup.length + 1; // +1:泉水卡
-        const cardW = Math.min(150, Math.floor(780 / n) - 8);
-        const makeCard = (i: number, name: string, emo: string, color: number, world: WorldDef | null, onClick: () => void) => {
+        const cardW = 118;
+        const makeCard = (i: number, key: 'spring' | FacilityType, name: string, emo: string, color: number, showCount: boolean) => {
             const cx = 24 + i * (cardW + 8) + cardW / 2;
             const cont = this.add.container(cx, 726).setDepth(10);
             const g = this.add.graphics();
@@ -448,17 +457,23 @@ export class Game extends Scene {
             g.fillRoundedRect(-cardW / 2, -27, cardW, 54, 9);
             g.lineStyle(2, color, 0.9);
             g.strokeRoundedRect(-cardW / 2, -27, cardW, 54, 9);
-            const nm = label(this, 0, -11, name, cardW < 96 ? 11 : 13, '#e8ecf4', 0.5);
-            const em = label(this, 0, 12, emo, 14, '#e8ecf4', 0.5);
+            const nm = label(this, 0, -11, name, 13, '#e8ecf4', 0.5);
+            const em = label(this, showCount ? -14 : 0, 12, emo, 14, '#e8ecf4', 0.5);
+            const countTxt = showCount ? label(this, 16, 12, '', 13, '#aab3c6', 0.5) : null;
             const z = this.add.zone(0, 0, cardW, 54).setInteractive({ useHandCursor: true });
-            z.on('pointerdown', onClick);
-            cont.add([g, nm, em, z]);
-            this.trayCards.push({ world, cont });
+            z.on('pointerdown', () => this.onCardClick(key));
+            cont.add(countTxt ? [g, nm, em, countTxt, z] : [g, nm, em, z]);
+            this.trayCards.push({ key, cont, countTxt });
         };
-        run.lineup.forEach((w, i) => {
-            makeCard(i, w.name, w.traits.map(t => TRAIT_EMOJI[t]).join(' '), w.color, w, () => this.onCardClick(w));
-        });
-        makeCard(run.lineup.length, '泉水・復活點', '⛲', SPRING_COLOR, null, () => this.onSpringCard());
+
+        makeCard(0, 'spring', '泉水・復活點', '⛲', SPRING_COLOR, false);
+        let i = 1;
+        for (const t of FACILITY_ORDER) {
+            if (this.grantsOf(t) > 0) {
+                const info = FACILITY_INFO[t];
+                makeCard(i++, t, info.name, info.emoji, info.color, true);
+            }
+        }
 
         this.riftStatus = this.add.text(928, 716, '', {
             fontFamily: FONT, fontSize: 15, color: '#c88fd8', align: 'center',
@@ -468,43 +483,37 @@ export class Game extends Scene {
     }
 
     private refreshTray() {
-        this.deployTxt.setText(`部署 ${this.deployed.size}/${this.lvl.deployLimit}|泉水 ${this.spring ? 1 : 0}/1`);
         for (const card of this.trayCards) {
-            if (card.world === null) {
+            if (card.key === 'spring') {
                 card.cont.setAlpha(this.spring ? 0.32 : 1);
             } else {
-                const placed = this.deployed.has(card.world.id);
-                const full = !placed && this.deployed.size >= this.lvl.deployLimit;
-                card.cont.setAlpha(placed ? 0.32 : full ? 0.55 : 1);
+                const left = this.remainingOf(card.key);
+                card.countTxt?.setText(`×${left}`);
+                card.cont.setAlpha(left > 0 ? 1 : 0.35);
             }
         }
     }
 
-    private onCardClick(w: WorldDef) {
+    private onCardClick(key: 'spring' | FacilityType) {
         if (this.phase !== 'run' || this.drawing) return;
-        if (this.deployed.has(w.id)) {
-            this.showMsg('這座異界已在場上(點它角落的 ✕ 可收回)', '#8a93a6');
+        if (key === 'spring') {
+            if (this.spring) {
+                this.showMsg('泉水已在場上(點它角落的 ✕ 可收回)', '#8a93a6');
+                return;
+            }
+            this.placing = 'spring';
+            this.makeGhost(SPRING_COLOR, '⛲');
             return;
         }
-        if (this.deployed.size >= this.lvl.deployLimit) {
-            this.showMsg(`本關部署上限 ${this.lvl.deployLimit} 座(場地空間有限)`, '#ff8c42');
+        if (this.remainingOf(key) <= 0) {
+            this.showMsg(`${FACILITY_INFO[key].name} 沒有庫存了(征服對應的異界可獲得)`, '#8a93a6');
             return;
         }
-        this.placing = w;
-        this.makeGhost(w.color, w.traits.map(tr => TRAIT_EMOJI[tr]).join(''));
+        this.placing = key;
+        this.makeGhost(FACILITY_INFO[key].color, FACILITY_INFO[key].emoji);
     }
 
-    private onSpringCard() {
-        if (this.phase !== 'run' || this.drawing) return;
-        if (this.spring) {
-            this.showMsg('泉水已在場上(點它角落的 ✕ 可收回)', '#8a93a6');
-            return;
-        }
-        this.placing = 'spring';
-        this.makeGhost(SPRING_COLOR, '⛲');
-    }
-
-    // ---------------------------------------------------------------- 放置與幽靈
+    // ---------------------------------------------------------------- 放置
 
     private makeGhost(color: number, emo: string) {
         this.destroyGhost();
@@ -524,14 +533,15 @@ export class Game extends Scene {
         this.ghost = null;
     }
 
+    /** 泉水/加工站都可放在空格;加工站允許蓋在既有的線上(改裝現有產線)。 */
     private canPlace(c: number, r: number): boolean {
         if (this.phase !== 'run') return false;
-        if (this.makerAt(c, r) || this.springAt(c, r) || this.doorAt(c, r) || this.announceAt(c, r)) return false;
+        if (this.springAt(c, r) || this.doorAt(c, r) || this.announceAt(c, r) || this.stationAt(c, r)) return false;
         return true;
     }
 
-    /** 建立源頭(異界/泉水)共用的容器與互動:本體、名牌、拖曳起點、收回按鈕。 */
-    private buildSourceCont(cell: Cell, emo: string, name: string, getSource: () => Source, onRemove: () => void) {
+    /** 放置容器共用:本體、名牌、✕ 收回鈕(badge 在 zone 之後加入 = 事件優先)。 */
+    private buildPieceCont(cell: Cell, emo: string, name: string, onTap: (() => void) | null, onRemove: () => void) {
         const x = cellX(cell.c), y = cellY(cell.r);
         const cont = this.add.container(x, y).setDepth(6);
         const body = this.add.graphics();
@@ -550,7 +560,7 @@ export class Game extends Scene {
         badge.add([bg, bx, bz]);
 
         cont.add([body, em, nm, zone, badge]);
-        zone.on('pointerdown', () => this.startDrawing(getSource()));
+        if (onTap) zone.on('pointerdown', onTap);
         bz.on('pointerdown', (_p: Phaser.Input.Pointer, _x: number, _y: number, ev: Phaser.Types.Input.EventData) => {
             ev.stopPropagation();
             onRemove();
@@ -558,104 +568,100 @@ export class Game extends Scene {
         return { cont, body, x, y };
     }
 
-    private placeMaker(w: WorldDef, cell: Cell) {
-        const maker = {} as Maker;
-        const built = this.buildSourceCont(cell, w.traits.map(t => TRAIT_EMOJI[t]).join(''), w.name,
-            () => maker, () => this.removeSource(maker));
-        Object.assign(maker, {
-            kind: 'maker' as const, world: w,
-            c: cell.c, r: cell.r, x: built.x, y: built.y,
-            color: w.color, routes: [], nextRoute: 0,
-            spawnT: BAL.MAKER_PERIOD,   // 滿蓄能:接上線的第一隻立刻出
-            parked: [],
-            cont: built.cont, body: built.body,
-        });
-        this.makers.push(maker);
-        this.deployed.add(w.id);
-        this.redrawSourceBody(maker);
-        this.refreshSourceLook(maker);
-        this.refreshTray();
-    }
-
     private placeSpring(cell: Cell) {
         const spring = {} as Spring;
-        const built = this.buildSourceCont(cell, '⛲', '泉水', () => spring, () => this.removeSource(spring));
+        const built = this.buildPieceCont(cell, '⛲', '泉水', () => this.startDrawing(), () => this.removeSpring());
         const countTxt = label(this, -24, -24, '', 11, '#53c2d8', 0.5).setVisible(false);
         built.cont.add(countTxt);
         Object.assign(spring, {
-            kind: 'spring' as const,
             c: cell.c, r: cell.r, x: built.x, y: built.y,
             color: SPRING_COLOR, routes: [], nextRoute: 0,
-            parked: [], incoming: [],
+            spawnT: BAL.SPAWN_PERIOD, parked: [], incoming: [],
             cont: built.cont, body: built.body, countTxt,
         });
         this.spring = spring;
-        this.redrawSourceBody(spring);
-        this.refreshSourceLook(spring);
+        this.redrawSpring();
         this.refreshTray();
-        this.showMsg('⛲ 泉水就位 —— 過門的單位將在此復活;拖曳畫線送他們再上工', '#53c2d8');
+        this.showMsg('⛲ 泉水就位 —— 軍團開始歸返;拖曳畫線把他們送往傳送門', '#53c2d8');
     }
 
-    private removeSource(src: Source) {
-        if (this.phase !== 'run') return;
-        if (this.drawing?.origin === src) this.cancelDrawing();
-        [...src.routes].forEach(rt => this.removeRoute(rt));
-        // 它派出的在途單位失去歸屬,原地散逸
+    private removeSpring() {
+        const sp = this.spring;
+        if (!sp || this.phase !== 'run') return;
+        this.cancelDrawing();
+        [...sp.routes].forEach(rt => this.removeRoute(rt));
         for (const mob of this.mobs) {
-            if (mob.alive && mob.kind === 'unit' && mob.route.origin === src) this.kill(mob, true);
+            if (mob.alive && mob.kind === 'unit') this.kill(mob, true); // 失去歸屬,散逸
         }
-        src.cont.destroy();
-        if (src.kind === 'maker') {
-            this.makers = this.makers.filter(x => x !== src);
-            this.deployed.delete(src.world.id);
-        } else {
-            this.spring = null; // 傳送中的單位一併散逸(incoming 隨物件丟棄)
-        }
+        sp.cont.destroy();
+        this.spring = null; // 傳送中/待命的一併散逸
         this.refreshTray();
     }
 
-    private redrawSourceBody(src: Source) {
-        src.body.clear();
-        if (src.kind === 'maker') {
-            src.body.fillStyle(src.color, 0.18);
-            src.body.fillRoundedRect(-24, -24, 48, 48, 11);
-            src.body.lineStyle(2.5, src.color, 1);
-            src.body.strokeRoundedRect(-24, -24, 48, 48, 11);
-        } else {
-            src.body.fillStyle(src.color, 0.14);
-            src.body.fillCircle(0, 0, 23);
-            src.body.lineStyle(2.5, src.color, 1);
-            src.body.strokeCircle(0, 0, 23);
-            src.body.lineStyle(1.5, src.color, 0.5);
-            src.body.strokeCircle(0, 0, 15);
-        }
-        // 產線佔用指示(x/上限)
-        for (let i = 0; i < BAL.MAX_ROUTES_PER_MAKER; i++) {
-            const used = i < src.routes.length;
-            src.body.fillStyle(used ? 0xffffff : 0x000000, used ? 0.9 : 0.35);
-            src.body.fillCircle(-7 + i * 14, 18, 3);
+    private redrawSpring() {
+        const sp = this.spring;
+        if (!sp) return;
+        sp.body.clear();
+        sp.body.fillStyle(sp.color, 0.14);
+        sp.body.fillCircle(0, 0, 23);
+        sp.body.lineStyle(2.5, sp.color, 1);
+        sp.body.strokeCircle(0, 0, 23);
+        sp.body.lineStyle(1.5, sp.color, 0.5);
+        sp.body.strokeCircle(0, 0, 15);
+        for (let i = 0; i < BAL.SPRING_MAX_LINES; i++) {
+            const used = i < sp.routes.length;
+            sp.body.fillStyle(used ? 0xffffff : 0x000000, used ? 0.9 : 0.35);
+            sp.body.fillCircle(-21 + i * 14, 20, 3);
         }
     }
 
-    private refreshSourceLook(src: Source) {
-        src.cont.setAlpha(src.routes.length === 0 ? 0.6 : 1);
+    private placeStation(type: FacilityType, cell: Cell) {
+        const info = FACILITY_INFO[type];
+        const station = {} as Station;
+        const built = this.buildPieceCont(cell, info.emoji, info.name, null, () => this.removeStation(station));
+        Object.assign(station, {
+            type, c: cell.c, r: cell.r, x: built.x, y: built.y,
+            disabledT: 0, cont: built.cont, body: built.body,
+        });
+        this.stations.push(station);
+        this.redrawStation(station);
+        this.refreshTray();
     }
 
-    // ---------------------------------------------------------------- 手繪產線
+    private removeStation(st: Station) {
+        if (this.phase !== 'run') return;
+        st.cont.destroy();
+        this.stations = this.stations.filter(x => x !== st);
+        this.refreshTray();
+    }
+
+    private redrawStation(st: Station) {
+        const info = FACILITY_INFO[st.type];
+        const disabled = st.disabledT > 0;
+        st.body.clear();
+        st.body.fillStyle(disabled ? 0x2a2a30 : info.color, disabled ? 0.4 : 0.16);
+        st.body.fillRoundedRect(-20, -20, 40, 40, 8);
+        st.body.lineStyle(2.5, disabled ? 0x555560 : info.color, 1);
+        st.body.strokeRoundedRect(-20, -20, 40, 40, 8);
+        st.cont.setAlpha(disabled ? 0.6 : 1);
+    }
+
+    // ---------------------------------------------------------------- 手繪產線(只從泉水出發)
 
     private drawableCell(c: number, r: number, keys: Set<number>): boolean {
-        return !this.makerAt(c, r) && !this.springAt(c, r) && !this.doorAt(c, r)
-            && !this.announceAt(c, r) && !keys.has(ck(c, r));
+        // 加工站的格子可以穿過(這正是加工的玩法);泉水/門/預告不可
+        return !this.springAt(c, r) && !this.doorAt(c, r) && !this.announceAt(c, r) && !keys.has(ck(c, r));
     }
 
-    private startDrawing(src: Source) {
-        if (this.phase !== 'run' || this.placing) return;
-        if (src.routes.length >= BAL.MAX_ROUTES_PER_MAKER) {
-            this.showMsg(`分流上限:每個源頭最多 ${BAL.MAX_ROUTES_PER_MAKER} 條線(點舊線拆除)`, '#ff8c42');
+    private startDrawing() {
+        const sp = this.spring;
+        if (!sp || this.phase !== 'run' || this.placing) return;
+        if (sp.routes.length >= BAL.SPRING_MAX_LINES) {
+            this.showMsg(`泉水的線已達上限 ${BAL.SPRING_MAX_LINES} 條(點舊線拆除)`, '#ff8c42');
             return;
         }
         const gfx = this.add.graphics().setDepth(3);
-        this.drawing = { origin: src, cells: [{ c: src.c, r: src.r }], keys: new Set([ck(src.c, src.r)]), gfx };
+        this.drawing = { cells: [{ c: sp.c, r: sp.r }], keys: new Set([ck(sp.c, sp.r)]), gfx };
         this.redrawPreview();
     }
 
@@ -666,7 +672,6 @@ export class Game extends Scene {
         if (!cell) return;
         const last = d.cells[d.cells.length - 1];
         if (cell.c === last.c && cell.r === last.r) return;
-        // 回拉:滑回倒數第二格 = 擦掉最後一格
         if (d.cells.length >= 2) {
             const prev = d.cells[d.cells.length - 2];
             if (cell.c === prev.c && cell.r === prev.r) {
@@ -684,7 +689,6 @@ export class Game extends Scene {
             this.redrawPreview();
             return;
         }
-        // 游標跳了好幾格(快速拖曳):用 BFS 補中間,自動繞過障礙
         if (!this.drawableCell(cell.c, cell.r, d.keys)) return;
         const bridge = bfsPath(last, cell, (c, r) => !this.drawableCell(c, r, d.keys));
         if (!bridge || d.cells.length + bridge.length - 1 > BAL.DRAW_MAX_CELLS) return;
@@ -697,24 +701,23 @@ export class Game extends Scene {
 
     private redrawPreview() {
         const d = this.drawing;
-        if (!d) return;
+        if (!d || !this.spring) return;
         const pts = d.cells.map(cl => ({ x: cellX(cl.c), y: cellY(cl.r) }));
         d.gfx.clear();
-        d.gfx.lineStyle(7, d.origin.color, 0.14);
+        d.gfx.lineStyle(7, SPRING_COLOR, 0.14);
         this.strokePolyline(d.gfx, pts);
-        d.gfx.lineStyle(3, d.origin.color, 0.95);
+        d.gfx.lineStyle(3, SPRING_COLOR, 0.95);
         this.strokePolyline(d.gfx, pts);
         const tip = pts[pts.length - 1];
-        d.gfx.fillStyle(d.origin.color, 1);
+        d.gfx.fillStyle(SPRING_COLOR, 1);
         d.gfx.fillCircle(tip.x, tip.y, 5);
     }
 
-    /** 放開滑鼠:落在門上(或能一小段接到門)就成線,否則取消。 */
     private finishDrawing(px: number, py: number) {
         const d = this.drawing;
         if (!d) return;
         const door = this.doorAtPoint(px, py);
-        if (door && door.state === 'active') {
+        if (door && door.state === 'active' && this.spring) {
             const last = d.cells[d.cells.length - 1];
             let cells: Cell[] | null = null;
             if (Math.abs(door.c - last.c) + Math.abs(door.r - last.r) === 1) {
@@ -729,7 +732,7 @@ export class Game extends Scene {
             }
             if (cells) {
                 this.cancelDrawing();
-                this.commitRoute(d.origin, door, cells);
+                this.commitRoute(door, cells);
                 return;
             }
             this.showMsg('接不到這扇門(路被擋住了)', '#ff8c42');
@@ -746,29 +749,30 @@ export class Game extends Scene {
         return this.doors.find(d => Math.abs(px - d.x) <= 32 && Math.abs(py - d.y) <= 60);
     }
 
-    private commitRoute(src: Source, door: Door, cells: Cell[]) {
-        const existing = src.routes.find(rt => rt.door === door);
+    private commitRoute(door: Door, cells: Cell[]) {
+        const sp = this.spring;
+        if (!sp) return;
+        const existing = sp.routes.find(rt => rt.door === door);
         if (existing) this.removeRoute(existing); // 重畫同目的地 = 取代舊線
 
         const points = cells.map(cl => ({ x: cellX(cl.c), y: cellY(cl.r) }));
         const line = this.add.graphics().setDepth(2);
-        line.lineStyle(7, src.color, 0.12);
+        line.lineStyle(7, SPRING_COLOR, 0.12);
         this.strokePolyline(line, points);
-        line.lineStyle(3, src.color, 0.8);
+        line.lineStyle(3, SPRING_COLOR, 0.8);
         this.strokePolyline(line, points);
 
-        const cellKeys = new Set(cells.map(cl => ck(cl.c, cl.r)));
         const route: Route = {
             id: this.routeSeq++,
-            origin: src, door, points, cellKeys,
+            origin: sp, door, points, cells,
+            cellKeys: new Set(cells.map(cl => ck(cl.c, cl.r))),
             length: (points.length - 1) * CELL,
             line, dead: false,
         };
         this.routesAll.push(route);
-        src.routes.push(route);
+        sp.routes.push(route);
         door.routes.push(route);
-        this.redrawSourceBody(src);
-        this.refreshSourceLook(src);
+        this.redrawSpring();
     }
 
     private strokePolyline(g: Phaser.GameObjects.Graphics, pts: { x: number; y: number }[]) {
@@ -785,22 +789,20 @@ export class Game extends Scene {
         this.routesAll = this.routesAll.filter(x => x !== rt);
         rt.origin.routes = rt.origin.routes.filter(x => x !== rt);
         rt.door.routes = rt.door.routes.filter(x => x !== rt);
-        // 線上的出征單位掉頭撤退(帶著剩餘價值回源頭待命);敵人本來就朝源頭走,讓它走完散逸
         for (const mob of this.mobs) {
             if (mob.alive && mob.route === rt && mob.kind === 'unit' && mob.dir === 1) {
-                mob.dir = -1;
+                mob.dir = -1; // 掉頭撤退回泉水待命
                 mob.gfx.setAlpha(0.45);
             }
         }
-        this.redrawSourceBody(rt.origin);
-        this.refreshSourceLook(rt.origin);
+        this.redrawSpring();
     }
 
     // ---------------------------------------------------------------- 輸入
 
     private wireInput() {
         this.input.on('pointerdown', (p: Phaser.Input.Pointer, over: Phaser.GameObjects.GameObject[]) => {
-            if (over.length > 0) return; // 點到互動物件時交給物件自己處理
+            if (over.length > 0) return;
             this.onBoardClick(p.x, p.y);
         });
         this.input.on('pointermove', (p: Phaser.Input.Pointer) => {
@@ -836,7 +838,7 @@ export class Game extends Scene {
         if (this.placing) {
             if (cell && this.canPlace(cell.c, cell.r)) {
                 if (this.placing === 'spring') this.placeSpring(cell);
-                else this.placeMaker(this.placing, cell);
+                else this.placeStation(this.placing, cell);
                 this.placing = null;
                 this.destroyGhost();
             } else {
@@ -844,13 +846,11 @@ export class Game extends Scene {
             }
             return;
         }
-        // 點到產線 = 拆線
         if (cell) {
             const hit = this.routesAll.find(rt => rt.cellKeys.has(ck(cell.c, cell.r)));
             if (hit) {
-                const from = hit.origin.kind === 'spring' ? '泉水' : hit.origin.world.name;
                 this.removeRoute(hit);
-                this.showMsg(`已拆除產線:${from} ✕ ${hit.door.spec.worldName}之門`, '#8a93a6');
+                this.showMsg(`已拆除產線:泉水 ✕ ${hit.door.spec.worldName}之門`, '#8a93a6');
             }
         }
     }
@@ -887,7 +887,6 @@ export class Game extends Scene {
     update(_t: number, dms: number) {
         const rdt = Math.min(dms, 50) / 1000;
         if (this.phase === 'run' && !this.paused) {
-            // 子步進:高速播放/掉幀時避免對沖偵測穿隧
             let sim = rdt * this.speed;
             while (sim > 0) {
                 const step = Math.min(sim, 0.033);
@@ -901,7 +900,6 @@ export class Game extends Scene {
     private simStep(dt: number) {
         // 0) 關卡時鐘與裂隙
         this.levelT += dt;
-        // 場上已無事可做(門都解決了)但還有裂隙沒開 → 提前撕開,避免乾等
         if (this.pending.length > 0 && this.announces.length === 0 && !this.doors.some(d => d.state === 'active')) {
             this.levelT = Math.max(this.levelT, this.pending[0].spawnAt - 1);
         }
@@ -915,22 +913,25 @@ export class Game extends Scene {
                 this.openRift(a);
             }
         }
+        if (!this.spring && this.levelT > 6 && !this.springNagged) {
+            this.springNagged = true;
+            this.showMsg('⚠ 還沒放置泉水 —— 沒有復活點,軍團無法歸返!', '#ff8c42');
+        }
 
-        // 1) 生產(異界,有連線才生產)
-        for (const m of this.makers) {
-            if (m.routes.length > 0) {
-                m.spawnT += dt;
-                while (m.spawnT >= BAL.MAKER_PERIOD) {
-                    m.spawnT -= BAL.MAKER_PERIOD;
-                    this.dispatch(m, { value: BAL.UNIT_VALUE, traits: m.world.traits });
+        // 1) 泉水:固定兵源(歸返傷兵)+ 裂隙傳送復活 + 待命隊伍
+        const sp = this.spring;
+        if (sp) {
+            if (sp.routes.length > 0) {
+                sp.spawnT += dt;
+                while (sp.spawnT >= BAL.SPAWN_PERIOD) {
+                    sp.spawnT -= BAL.SPAWN_PERIOD;
+                    const w = run.lineup[Math.floor(Math.random() * run.lineup.length)];
+                    const hp = BAL.ARRIVAL_MIN + Math.random() * (BAL.ARRIVAL_MAX - BAL.ARRIVAL_MIN);
+                    this.dispatch({ value: BAL.UNIT_VALUE * hp, traits: [...w.traits] });
                 }
             } else {
-                m.spawnT = Math.min(m.spawnT + dt, BAL.MAKER_PERIOD);
+                sp.spawnT = Math.min(sp.spawnT + dt, BAL.SPAWN_PERIOD);
             }
-        }
-        // 1.5) 泉水:裂隙傳送抵達 → 小補復活 → 派出(沒線就待命)
-        if (this.spring) {
-            const sp = this.spring;
             for (const tr of [...sp.incoming]) {
                 tr.t -= dt;
                 if (tr.t > 0) continue;
@@ -940,30 +941,32 @@ export class Game extends Scene {
                     traits: tr.traits,
                 };
                 this.poof(sp.x, sp.y, worldColor(parcel.traits));
-                if (sp.routes.length > 0) {
-                    this.dispatch(sp, parcel);
-                } else {
-                    sp.parked.push(parcel);
-                    if (!this.springHintShown) {
-                        this.springHintShown = true;
-                        this.showMsg('單位已在泉水待命 —— 從泉水拖曳畫線,送他們再上工', '#53c2d8');
-                    }
-                }
+                if (sp.routes.length > 0) this.dispatch(parcel);
+                else sp.parked.push(parcel);
             }
-        }
-        // 1.6) 待命隊伍:有線就出發(適用異界與泉水)
-        for (const src of this.sources()) {
-            while (src.parked.length > 0 && src.routes.length > 0) {
-                this.dispatch(src, src.parked.pop()!);
+            while (sp.parked.length > 0 && sp.routes.length > 0) {
+                this.dispatch(sp.parked.pop()!);
             }
         }
 
-        // 2) 移動
+        // 2) 移動 + 加工站觸發(單位:生效;敵人:癱瘓它)
         for (const mob of this.mobs) {
             if (!mob.alive) continue;
             mob.dist += mob.dir * BAL.UNIT_SPEED * dt;
             const p = this.pointAt(mob.route, mob.dist);
             mob.gfx.setPosition(p.x, p.y);
+            const k = Math.round(Math.max(0, Math.min(mob.dist, mob.route.length)) / CELL);
+            if (k !== mob.cellK) {
+                mob.cellK = k;
+                const cl = mob.route.cells[k];
+                if (cl) {
+                    const st = this.stationAt(cl.c, cl.r);
+                    if (st) {
+                        if (mob.kind === 'unit' && mob.dir === 1 && st.disabledT <= 0) this.applyStation(st, mob);
+                        else if (mob.kind === 'enemy') this.disableStation(st);
+                    }
+                }
+            }
         }
 
         // 3) 路徑對沖(GDD:小的消滅、大的扣除續行、相等同歸於盡)
@@ -1003,30 +1006,30 @@ export class Game extends Scene {
                         const gain = mob.value * w;
                         door.progress += gain;
                         this.floatText(door.x + 30, door.y - 26, `+${gain.toFixed(1)}`,
-                            w >= 0.99 ? '#ffd35c' : w >= 0.55 ? '#e8ecf4' : '#8a93a6');
+                            w >= 0.99 ? '#ffd35c' : w >= 0.5 ? '#e8ecf4' : '#8a93a6');
                     }
-                    mob.value *= BAL.PASS_MULT; // 過門打折(GDD 4 折)
+                    mob.value *= BAL.PASS_MULT;
                     if (mob.value < BAL.CULL_VALUE || !this.spring) {
-                        this.kill(mob, true);   // 榨乾,或場上沒有泉水 → 消散
+                        this.kill(mob, true);   // 榨乾,或泉水不在 → 消散
                         continue;
                     }
-                    // 裂隙傳送 → 泉水復活(v0.3:不再原路折返)
                     this.spring.incoming.push({ value: mob.value, traits: mob.traits, t: BAL.RIFT_TRANSIT });
                     this.kill(mob, true);
                 } else if (mob.dir === -1 && mob.dist <= 0) {
-                    // 只有「線被拆」的撤退單位會走到這:回到源頭待命
                     mob.route.origin.parked.push({ value: mob.value, traits: mob.traits });
                     this.kill(mob, false);
                 }
             } else if (mob.dist <= 0) {
-                this.kill(mob, false); // 敵人走到產線源頭即散逸(原型簡化)
+                this.kill(mob, false); // 敵人走到泉水端散逸(還不會破壞泉水)
             }
         }
 
-        // 5) 門的推拉
+        // 5) 門的推拉(抵抗隨開門時間扎根)
         for (const d of this.doors) {
             if (d.state !== 'active') continue;
-            d.progress -= this.lvl.drain * dt;
+            d.age += dt;
+            const drain = this.doorDrain(d);
+            d.progress -= drain * dt;
 
             if (d.progress <= BAL.BASE * BAL.COLLAPSE_RATIO) {
                 this.collapseDoor(d);
@@ -1042,7 +1045,7 @@ export class Game extends Scene {
                 d.wasBacklash = true;
                 this.redrawDoorBody(d);
                 this.cameras.main.shake(120, 0.003);
-                this.showMsg(`⚠ ${d.spec.worldName}之門開始反噬!敵人正沿產線殺回來`, '#ff8c42');
+                this.showMsg(`⚠ ${d.spec.worldName}之門開始反噬!敵人正殺進你的後勤網`, '#ff8c42');
             } else if (!backlash && d.wasBacklash) {
                 d.wasBacklash = false;
                 d.cont.setAlpha(1);
@@ -1050,8 +1053,10 @@ export class Game extends Scene {
             }
             if (backlash && d.routes.length > 0) {
                 d.enemyT += dt;
-                while (d.enemyT >= this.lvl.enemyPeriod) {
-                    d.enemyT -= this.lvl.enemyPeriod;
+                // 湧出頻率隨扎根程度加快(抵抗越高、出兵越急)
+                const period = Math.max(BAL.ENEMY_PERIOD_MIN, this.lvl.enemyPeriod * (this.lvl.drain / drain));
+                while (d.enemyT >= period) {
+                    d.enemyT -= period;
                     const rt = d.routes[d.rr % d.routes.length];
                     d.rr++;
                     this.spawnEnemy(rt);
@@ -1070,8 +1075,45 @@ export class Game extends Scene {
             this.updateDoorText(d);
         }
 
+        // 5.5) 加工站癱瘓恢復
+        for (const st of this.stations) {
+            if (st.disabledT > 0) {
+                st.disabledT -= dt;
+                if (st.disabledT <= 0) {
+                    st.disabledT = 0;
+                    this.redrawStation(st);
+                }
+            }
+        }
+
         // 6) 清理
         this.mobs = this.mobs.filter(m => m.alive);
+    }
+
+    private applyStation(st: Station, mob: Mob) {
+        if (st.type === 'heal') {
+            if (mob.value >= BAL.UNIT_VALUE) return;
+            mob.value = Math.min(mob.value + BAL.HEAL_STATION, BAL.UNIT_VALUE);
+            this.scaleMob(mob);
+            this.floatText(st.x, st.y - 26, `+${BAL.HEAL_STATION}`, '#7dd87d');
+        } else {
+            const race = mob.traits[0];
+            if (mob.traits[1] === st.type) return; // 已是同屬性
+            mob.traits = [race, st.type];          // 屬性欄:新蓋舊(種族先天不可變)
+            mob.gfx.setStrokeStyle(2, TRAIT_COLOR[st.type]);
+            this.floatText(st.x, st.y - 26, TRAIT_EMOJI[st.type], '#e8ecf4');
+        }
+    }
+
+    private disableStation(st: Station) {
+        if (st.disabledT > 0) {
+            st.disabledT = BAL.STATION_DISABLE;
+            return;
+        }
+        st.disabledT = BAL.STATION_DISABLE;
+        this.redrawStation(st);
+        this.floatText(st.x, st.y - 26, '⚡癱瘓!', '#ff8c42');
+        this.showMsg(`⚡ ${FACILITY_INFO[st.type].name}被反噬敵人癱瘓了!`, '#ff8c42');
     }
 
     private visualStep(rdt: number) {
@@ -1081,7 +1123,6 @@ export class Game extends Scene {
                 d.cont.setAlpha(0.74 + 0.26 * Math.sin(this.pulseT * 9));
             }
         }
-        // 裂隙預告:脈動的圈
         for (const a of this.announces) {
             const x = cellX(a.c), y = cellY(a.r);
             const t = 1 - a.remain / BAL.RIFT_LEAD;
@@ -1092,13 +1133,11 @@ export class Game extends Scene {
             a.gfx.lineStyle(1.5, 0xc88fd8, 0.25);
             a.gfx.strokeCircle(x, y, 12 + 6 * pulse);
         }
-        // 泉水:待命人數
         if (this.spring) {
             const n = this.spring.parked.length;
             this.spring.countTxt.setVisible(n > 0);
             if (n > 0) this.spring.countTxt.setText(`${n}`);
         }
-        // 右下狀態:下一道裂隙
         let status: string;
         if (this.announces.length > 0) {
             status = '裂隙擴大中!';
@@ -1133,15 +1172,18 @@ export class Game extends Scene {
         return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
     }
 
-    private dispatch(src: Source, parcel: Parcel) {
-        const rt = src.routes[src.nextRoute % src.routes.length]; // 分流:輪流均分
-        src.nextRoute++;
+    private dispatch(parcel: Parcel) {
+        const sp = this.spring;
+        if (!sp || sp.routes.length === 0) return;
+        const rt = sp.routes[sp.nextRoute % sp.routes.length]; // 輪流均分
+        sp.nextRoute++;
         const color = worldColor(parcel.traits);
-        const gfx = this.add.circle(src.x, src.y, 7, color).setDepth(4);
-        gfx.setStrokeStyle(1.5, 0x0b0e13);
+        const gfx = this.add.circle(sp.x, sp.y, 7, color).setDepth(4);
+        const elem = parcel.traits[1];
+        gfx.setStrokeStyle(elem ? 2 : 1.5, elem ? TRAIT_COLOR[elem] : 0x0b0e13);
         const mob: Mob = {
             kind: 'unit', value: parcel.value, traits: parcel.traits, route: rt,
-            dist: 0, dir: 1, color, gfx, alive: true,
+            dist: 0, dir: 1, cellK: 0, color, gfx, alive: true,
         };
         this.scaleMob(mob);
         this.mobs.push(mob);
@@ -1154,7 +1196,7 @@ export class Game extends Scene {
         gfx.setStrokeStyle(1.5, 0x2a0f0f);
         const mob: Mob = {
             kind: 'enemy', value: BAL.ENEMY_VALUE, traits: [], route: rt,
-            dist: rt.length, dir: -1, color: 0xd84848, gfx, alive: true,
+            dist: rt.length, dir: -1, cellK: rt.cells.length - 1, color: 0xd84848, gfx, alive: true,
         };
         this.scaleMob(mob);
         this.mobs.push(mob);
@@ -1243,7 +1285,8 @@ export class Game extends Scene {
         const lines: string[] = [];
         if (gained.length > 0) {
             lines.push(`征服異界:${gained.map(g => g.name).join('、')}`);
-            lines.push('它們已加入你的生產陣容,下一關可以部署。');
+            const facs = gained.map(g => FACILITY_INFO[facilityOfWorld(g)].name).join('、');
+            lines.push(`兵源加入該族,並獲得設施:${facs}`);
         } else {
             lines.push('沒有征服任何異界……勉強撐了過去。');
         }

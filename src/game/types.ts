@@ -36,9 +36,25 @@ export interface DoorSpec {
 export interface LevelSpec {
     level: number;
     doors: DoorSpec[];
-    drain: number;        // 本關門抵抗 / 秒
-    enemyPeriod: number;  // 本關反噬湧出間隔
-    deployLimit: number;  // 本關可部署異界數(場地空間約束)
+    drain: number;        // 本關門的「基礎」抵抗 / 秒(隨開門時間另有扎根成長)
+    enemyPeriod: number;  // 本關反噬湧出間隔基準
+}
+
+// ---- 加工站(v0.4:征服異界的設施獎勵;元素附魔站直接以 Trait 命名) ----
+
+export type FacilityType = 'heal' | '火' | '水' | '時';
+
+export const FACILITY_INFO: Record<FacilityType, { name: string; emoji: string; color: number }> = {
+    heal: { name: '回復站', emoji: '✚', color: 0x7dd87d },
+    火: { name: '火附魔站', emoji: '🔥', color: TRAIT_COLOR.火 },
+    水: { name: '水附魔站', emoji: '💧', color: TRAIT_COLOR.水 },
+    時: { name: '時附魔站', emoji: '⏳', color: TRAIT_COLOR.時 },
+};
+
+/** 征服(或起始擁有)一個異界獲得的設施:有屬性 → 該屬性附魔站;純種族界 → 回復站。 */
+export function facilityOfWorld(w: WorldDef): FacilityType {
+    const elem = w.traits.find(t => ELEMENTS.includes(t));
+    return (elem as FacilityType | undefined) ?? 'heal';
 }
 
 export function worldColor(traits: Trait[]): number {
