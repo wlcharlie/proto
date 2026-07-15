@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A browser game built on **Phaser 4** with **Vite** bundling and **TypeScript**. This is the near-unmodified `phaserjs/template-vite-ts` starter (the scenes still contain placeholder art and text like "Make something fun!"), so most work here is building the actual game on top of the template scaffolding. Note: the directory is `riftlord`, but `package.json` still carries the template's `name`/metadata — update those when the game takes shape, since `log.js` reports `package.json.name`.
+《異界魔王》RIFTLORD — a browser game built on **Phaser 4** with **Vite** bundling and **TypeScript**, started from the `phaserjs/template-vite-ts` scaffold. A portal-conquest production-line roguelike: place worlds (makers), wire supply lines to portals, portals backlash when under-fed. Design docs live in `docs/`: `gdd.md` is the design source of truth; `prototype-notes.md` records the v0.1 prototype's scope, design calls made during implementation, and tuning knobs. UI text is Traditional Chinese.
 
 ## Commands
 
@@ -23,30 +23,33 @@ There is **no test runner and no linter** configured. Type safety comes solely f
 ## Architecture
 
 **Two-stage bootstrap:**
-- `src/main.ts` — waits for `DOMContentLoaded`, then calls `StartGame('game-container')`.
-- `src/game/main.ts` — defines the Phaser `GameConfig` (fixed canvas **1024×768**, `type: AUTO` for WebGL-with-canvas-fallback) and lists the scenes. This is where global game settings live.
+- `src/main.ts` — waits for `DOMContentLoaded`, calls `StartGame('game-container')`, and exposes the game instance as `window.__game` (debug handle for console/tests).
+- `src/game/main.ts` — defines the Phaser `GameConfig` (fixed canvas **1024×768**, `type: AUTO`, `Scale.FIT` + center) and lists the scenes. This is where global game settings live.
 
-**Scene pipeline** (`src/game/scenes/`) — the game is a linear chain of Phaser `Scene`s. The **first scene in the config array auto-starts**; every subsequent transition is an explicit `this.scene.start('Name')` inside the current scene:
+**Scene pipeline** (`src/game/scenes/`) — the **first scene in the config array auto-starts**; every transition is an explicit `this.scene.start('Name')`:
 
 ```
-Boot → Preloader → MainMenu → Game → GameOver → (back to MainMenu)
+MainMenu → Game → GameOver → (MainMenu or straight back to Game)
 ```
 
-- `Boot` — loads only the minimal assets needed to render the Preloader (there is no loading UI yet at this point), then starts `Preloader`.
-- `Preloader` — displays a progress bar wired to the loader's `progress` event, loads the bulk of game assets, then starts `MainMenu`. Add global animations / shared objects in its `create()`.
-- `MainMenu`, `Game`, `GameOver` — currently placeholder screens; each advances on `pointerdown`.
+There is no Boot/Preloader chain: all art is programmatic (Graphics + emoji Text), nothing is loaded. `Game` restarts itself (`scene.restart()`) for each new level; all of its state must be re-zeroed at the top of `create()`.
 
-When adding a scene: create the class in `src/game/scenes/`, import it, and register it in the `scene` array in `src/game/main.ts`. Ordering in that array matters only for which scene boots first.
+**Game modules** (`src/game/`):
+- `balance.ts` — every tuning knob, commented against the GDD's proposed values. Tune here, nowhere else.
+- `types.ts` — traits/worlds/doors types + trait tables (emoji, colors, name generation) + starting lineup.
+- `levelgen.ts` — per-level door specs (req count ramps by level), drain/enemy scaling, deploy limit.
+- `grid.ts` — 15×9 board geometry (64px cells at offset 32,88) + BFS pathfinding for routes.
+- `run.ts` — mutable singleton for the current run (level, integrity, lineup, conquests).
+- `save.ts` — meta progression (reward points, unlock defs) persisted in `localStorage` key `riftlord_save_v1`.
+- `ui.ts` — `label()`/`makeButton()` helpers; shared CJK font stack.
 
-**Coordinates:** scenes hard-code the canvas center as `(512, 384)` — that is `1024/2, 768/2`. If you change the canvas size in the config, these literals must change too.
+**Coordinates:** menu scenes hard-code the canvas center `(512, 384)`; the board layout constants live in `grid.ts`. If you change the canvas size, both must change.
 
 ## Assets
 
-Two loading paths (see README "Handling Assets"):
-- **Bundled** — `import logoImg from './assets/logo.png'`, then `this.load.image('logo', logoImg)`. Hashed and processed by Vite.
-- **Static** — files in `public/assets/` are served/copied verbatim; reference them by string path, e.g. `this.load.image('background', 'assets/bg.png')`. `Preloader` uses `this.load.setPath('assets')` so its keys are relative to that folder.
+Currently **zero external assets** — everything is drawn with Graphics/Text. `public/assets/bg.png` and `logo.png` are unused template leftovers. When real art arrives, use the template's two loading paths (see README "Handling Assets"): bundled imports under `src/`, or static files in `public/assets/` referenced by string path.
 
-`public/style.css` and `public/favicon.png` are also served from the web root (referenced as `/style.css`, `/favicon.png` in `index.html`).
+`public/style.css` and `public/favicon.png` are served from the web root (referenced as `/style.css`, `/favicon.png` in `index.html`).
 
 ## Vite config
 

@@ -1,7 +1,7 @@
 {
-  "name": "template-vite-ts",
-  "description": "A Phaser 3 TypeScript template using Vite.",
-  "version": "1.4.0",
+  "name": "riftlord",
+  "description": "《異界魔王》RIFTLORD — a portal-conquest production-line roguelike built on Phaser 4.",
+  "version": "0.1.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/phaserjs/template-vite-ts.git"
